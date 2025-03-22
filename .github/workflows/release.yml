@@ -12,9 +12,41 @@ jobs:
       should_build: ${{ steps.compare_versions.outputs.should_build }}
     steps:
       - name: Get upstream version
+        id: get_upstream
         run: |
           LATEST_URL=$(curl -sI https://github.com/Yuri-NagaSaki/ImageFlow/releases/latest | grep -i location: | awk -F'tag/' '{print $2}' | tr -d '\r')
           echo "UPSTREAM_VERSION=${LATEST_URL#v}" >> $GITHUB_ENV
+          echo "Upstream version: $UPSTREAM_VERSION"
+
+      - name: Get current version
+        id: get_current
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 处理无 release 的情况 [[5]](#__5)
+          CURRENT_VERSION=$(gh api repos/${{ github.repository }}/releases/latest --jq '.tag_name' 2>/dev/null || echo "v0.0.0")
+          CURRENT_VERSION=${CURRENT_VERSION#v}
+          echo "CURRENT_VERSION=$CURRENT_VERSION" >> $GITHUB_ENV
+          echo "Current version: $CURRENT_VERSION"
+
+      - name: Compare versions
+        id: compare_versions
+        run: |
+          # 使用语义化版本比较工具 [[5]](#__5)
+          sudo apt-get install -y python3-semver
+          comparison=$(python3 -c "import semver; print(semver.compare('$UPSTREAM_VERSION', '$CURRENT_VERSION'))")
+          
+          if [ "$comparison" -eq 1 ]; then
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Debug output
+        run: |
+          echo "Upstream: $UPSTREAM_VERSION"
+          echo "Current: $CURRENT_VERSION"
+          echo "Should build: ${{ steps.compare_versions.outputs.should_build }}"
 
   build_freebsd:
     needs: version_check
