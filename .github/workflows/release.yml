@@ -14,29 +14,28 @@ jobs:
       - name: Get upstream version
         id: get_upstream
         run: |
+          # 解析上游仓库最新版本 [[0]](#__0)
           LATEST_URL=$(curl -sI https://github.com/Yuri-NagaSaki/ImageFlow/releases/latest | grep -i location: | awk -F'tag/' '{print $2}' | tr -d '\r')
           echo "UPSTREAM_VERSION=${LATEST_URL#v}" >> $GITHUB_ENV
-          echo "Upstream version: $UPSTREAM_VERSION"
 
       - name: Get current version
         id: get_current
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 处理无 release 的情况 [[5]](#__5)
-          CURRENT_VERSION=$(gh api repos/${{ github.repository }}/releases/latest --jq '.tag_name' 2>/dev/null || echo "v0.0.0")
-          CURRENT_VERSION=${CURRENT_VERSION#v}
-          echo "CURRENT_VERSION=$CURRENT_VERSION" >> $GITHUB_ENV
-          echo "Current version: $CURRENT_VERSION"
+          # 解析当前仓库最新版本（无API调用） [[0]](#__0)
+          if ! CURRENT_URL=$(curl -sI https://github.com/${{ github.repository }}/releases/latest | grep -i location:); then
+            echo "CURRENT_VERSION=0.0.0" >> $GITHUB_ENV
+            exit 0
+          fi
+          TAG_NAME=$(echo "$CURRENT_URL" | awk -F'tag/' '{print $2}' | tr -d '\r')
+          echo "CURRENT_VERSION=${TAG_NAME#v}" >> $GITHUB_ENV
 
       - name: Compare versions
         id: compare_versions
         run: |
-          # 使用语义化版本比较工具 [[5]](#__5)
-          sudo apt-get install -y python3-semver
-          comparison=$(python3 -c "import semver; print(semver.compare('$UPSTREAM_VERSION', '$CURRENT_VERSION'))")
+          # 使用版本排序比较 [[2]](#__2)
+          HIGHER_VERSION=$(printf "$UPSTREAM_VERSION\n$CURRENT_VERSION" | sort -V | tail -n1)
           
-          if [ "$comparison" -eq 1 ]; then
+          if [ "$HIGHER_VERSION" == "$UPSTREAM_VERSION" ] && [ "$UPSTREAM_VERSION" != "$CURRENT_VERSION" ]; then
             echo "should_build=true" >> $GITHUB_OUTPUT
           else
             echo "should_build=false" >> $GITHUB_OUTPUT
@@ -44,9 +43,10 @@ jobs:
 
       - name: Debug output
         run: |
-          echo "Upstream: $UPSTREAM_VERSION"
-          echo "Current: $CURRENT_VERSION"
-          echo "Should build: ${{ steps.compare_versions.outputs.should_build }}"
+          echo "Upstream Version: $UPSTREAM_VERSION"
+          echo "Current Version: $CURRENT_VERSION"
+          echo "Should Build: ${{ steps.compare_versions.outputs.should_build }}"
+
 
   build_freebsd:
     needs: version_check
