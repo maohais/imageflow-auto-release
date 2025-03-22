@@ -1,0 +1,113 @@
+name: Cross-Platform Build and Release
+
+on:
+  workflow_dispatch: # 允许手动触发
+  schedule:
+    - cron: '0 12 * * *' # 每天UTC时间12点自动检查版本更新
+
+jobs:
+  version_check:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.compare_versions.outputs.should_build }}
+    steps:
+      - name: Get upstream version
+        id: get_upstream
+        run: |
+          LATEST_URL=$(curl -sI https://github.com/Yuri-NagaSaki/ImageFlow/releases/latest | grep -i location: | awk -F'tag/' '{print $2}' | tr -d '\r')
+          echo "UPSTREAM_VERSION=${LATEST_URL#v}" >> $GITHUB_ENV
+          echo "Upstream version: $UPSTREAM_VERSION"
+
+      - name: Get current version
+        id: get_current
+        run: |
+          CURRENT_VERSION=$(gh api repos/${{ github.repository }}/releases/latest --jq '.tag_name' | sed 's/^v//')
+          echo "CURRENT_VERSION=${CURRENT_VERSION:-0.0.0}" >> $GITHUB_ENV
+          echo "Current version: $CURRENT_VERSION"
+
+      - name: Compare versions
+        id: compare_versions
+        run: |
+          if [ "$UPSTREAM_VERSION" \> "$CURRENT_VERSION" ]; then
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    needs: version_check
+    if: needs.version_check.outputs.should_build == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        arch: [amd64, arm64]
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            binary_suffix: linux
+          - os: macos-latest
+            goos: darwin
+            binary_suffix: macos
+          - os: windows-latest
+            goos: windows
+            binary_suffix: windows
+          - arch: amd64
+            goarch: amd64
+            arch_suffix: x86_64
+          - arch: arm64
+            goarch: arm64
+            arch_suffix: arm64
+        exclude:
+          - os: windows-latest
+            arch: arm64 # Windows ARM64需要特殊处理
+
+    steps:
+      - name: Clone upstream repo
+        run: git clone https://github.com/Yuri-NagaSaki/ImageFlow
+        working-directory: ${{ runner.temp }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Build binary
+        working-directory: ${{ runner.temp }}/ImageFlow
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: 0
+        run: |
+          output_name="imageflow-${{ matrix.binary_suffix }}-${{ matrix.arch_suffix }}"
+          if [ "${{ matrix.goos }}" == "windows" ]; then
+            output_name="$output_name.exe"
+          fi
+          go build -o $output_name main.go
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: imageflow-${{ matrix.binary_suffix }}-${{ matrix.arch_suffix }}
+          path: ${{ runner.temp }}/ImageFlow/imageflow-*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ env.UPSTREAM_VERSION }}
+          name: "v${{ env.UPSTREAM_VERSION }} Cross-Platform Build"
+          body: "Automated build for version ${{ env.UPSTREAM_VERSION }}"
+          files: |
+            imageflow-*/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
