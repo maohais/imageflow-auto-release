@@ -1,9 +1,9 @@
-name: Cross-Platform Build and Release
+name: FreeBSD Build and Release
 
 on:
-  workflow_dispatch: # 允许手动触发
+  workflow_dispatch:
   schedule:
-    - cron: '0 12 * * *' # 每天UTC时间12点自动检查版本更新
+    - cron: '0 12 * * *' # 每日自动检查版本
 
 jobs:
   version_check:
@@ -12,102 +12,87 @@ jobs:
       should_build: ${{ steps.compare_versions.outputs.should_build }}
     steps:
       - name: Get upstream version
-        id: get_upstream
         run: |
           LATEST_URL=$(curl -sI https://github.com/Yuri-NagaSaki/ImageFlow/releases/latest | grep -i location: | awk -F'tag/' '{print $2}' | tr -d '\r')
           echo "UPSTREAM_VERSION=${LATEST_URL#v}" >> $GITHUB_ENV
-          echo "Upstream version: $UPSTREAM_VERSION"
 
-      - name: Get current version
-        id: get_current
-        run: |
-          CURRENT_VERSION=$(gh api repos/${{ github.repository }}/releases/latest --jq '.tag_name' | sed 's/^v//')
-          echo "CURRENT_VERSION=${CURRENT_VERSION:-0.0.0}" >> $GITHUB_ENV
-          echo "Current version: $CURRENT_VERSION"
-
-      - name: Compare versions
-        id: compare_versions
-        run: |
-          if [ "$UPSTREAM_VERSION" \> "$CURRENT_VERSION" ]; then
-            echo "should_build=true" >> $GITHUB_OUTPUT
-          else
-            echo "should_build=false" >> $GITHUB_OUTPUT
-          fi
-
-  build:
+  build_freebsd:
     needs: version_check
     if: needs.version_check.outputs.should_build == 'true'
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
         arch: [amd64, arm64]
-        include:
-          - os: ubuntu-latest
-            goos: linux
-            binary_suffix: linux
-          - os: macos-latest
-            goos: darwin
-            binary_suffix: macos
-          - os: windows-latest
-            goos: windows
-            binary_suffix: windows
-          - arch: amd64
-            goarch: amd64
-            arch_suffix: x86_64
-          - arch: arm64
-            goarch: arm64
-            arch_suffix: arm64
-        exclude:
-          - os: windows-latest
-            arch: arm64 # Windows ARM64需要特殊处理
-
     steps:
+      - name: Setup FreeBSD VM
+        uses: vmactions/freebsd-vm@v2
+        with:
+          version: '13.2' # FreeBSD 最新稳定版 [[0]](#__0)
+
       - name: Clone upstream repo
         run: git clone https://github.com/Yuri-NagaSaki/ImageFlow
-        working-directory: ${{ runner.temp }}
+        working-directory: /freebsd
 
-      - name: Set up Go
-        uses: actions/setup-go@v4
-        with:
-          go-version: '1.22'
-          cache: true
+      - name: Install build tools
+        run: |
+          pkg install -y go gmake clang12
 
       - name: Build binary
-        working-directory: ${{ runner.temp }}/ImageFlow
+        working-directory: /freebsd/ImageFlow
         env:
-          GOOS: ${{ matrix.goos }}
+          GOOS: freebsd
           GOARCH: ${{ matrix.arch }}
-          CGO_ENABLED: 0
+          CGO_ENABLED: 1 # 强制启用 CGO [[3]](#__3)
         run: |
-          output_name="imageflow-${{ matrix.binary_suffix }}-${{ matrix.arch_suffix }}"
-          if [ "${{ matrix.goos }}" == "windows" ]; then
-            output_name="$output_name.exe"
-          fi
-          go build -o $output_name main.go
+          output_name="imageflow-freebsd-${{ matrix.arch }}"
+          go build -ldflags="-extld=clang" -o $output_name main.go
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: imageflow-${{ matrix.binary_suffix }}-${{ matrix.arch_suffix }}
-          path: ${{ runner.temp }}/ImageFlow/imageflow-*
+          name: freebsd-${{ matrix.arch }}
+          path: /freebsd/ImageFlow/imageflow-freebsd-*
+
+  build_linux:
+    needs: version_check
+    if: needs.version_check.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: Clone repo
+        run: git clone https://github.com/Yuri-NagaSaki/ImageFlow
+
+      - name: Build Linux binary
+        working-directory: ImageFlow
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          go build -o imageflow-linux-${{ matrix.arch }} main.go
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: ImageFlow/imageflow-linux-*
 
   release:
-    needs: build
+    needs: [build_freebsd, build_linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Download all artifacts
+      - name: Download artifacts
         uses: actions/download-artifact@v4
 
       - name: Create release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: v${{ env.UPSTREAM_VERSION }}
-          name: "v${{ env.UPSTREAM_VERSION }} Cross-Platform Build"
-          body: "Automated build for version ${{ env.UPSTREAM_VERSION }}"
           files: |
-            imageflow-*/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            linux-amd64/imageflow-linux-amd64
+            linux-arm64/imageflow-linux-arm64
+            freebsd-amd64/imageflow-freebsd-amd64
+            freebsd-arm64/imageflow-freebsd-arm64
