@@ -56,35 +56,65 @@ jobs:
       matrix:
         arch: [amd64, arm64]
     steps:
-      - name: Setup FreeBSD VM
-        uses: vmactions/freebsd-vm@v2
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3
         with:
-          version: '13.2' # FreeBSD 最新稳定版 [[0]](#__0)
+          platforms: all
 
-      - name: Clone upstream repo
-        run: git clone https://github.com/Yuri-NagaSaki/ImageFlow
-        working-directory: /freebsd
-
-      - name: Install build tools
+      - name: Create virtual disk
         run: |
-          pkg install -y go gmake clang12
+          qemu-img create -f qcow2 freebsd.qcow2 10G
+
+      - name: Download FreeBSD ISO
+        run: |
+          wget https://download.freebsd.org/ftp/releases/ISO-IMAGES/13.2/FreeBSD-13.2-RELEASE-amd64-disc1.iso
+
+      - name: Install FreeBSD (自动化安装)
+        run: |
+          expect <<EOF
+          set timeout 600
+          spawn qemu-system-x86_64 \
+            -m 2048 \
+            -smp 2 \
+            -drive file=freebsd.qcow2,format=qcow2 \
+            -cdrom FreeBSD-13.2-RELEASE-amd64-disc1.iso \
+            -net user,hostfwd=tcp::2222-:22 \
+            -net nic \
+            -nographic
+
+          expect "Welcome to FreeBSD"
+          send "\r"
+          expect "Install"
+          send "\r"
+          # 后续自动化应答脚本...
+          EOF
+
+      - name: Configure SSH access
+        run: |
+          sshpass -p 'root' ssh -o StrictHostKeyChecking=no root@localhost -p 2222 <<EOF
+          pw usermod root -h 0 # 清空root密码
+          echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config
+          service sshd restart
+          EOF
 
       - name: Build binary
-        working-directory: /freebsd/ImageFlow
-        env:
-          GOOS: freebsd
-          GOARCH: ${{ matrix.arch }}
-          CGO_ENABLED: 1 # 强制启用 CGO [[3]](#__3)
         run: |
-          output_name="imageflow-freebsd-${{ matrix.arch }}"
-          go build -ldflags="-extld=clang" -o $output_name main.go
+          ssh -o StrictHostKeyChecking=no root@localhost -p 2222 <<EOF
+          pkg install -y go gmake
+          git clone https://github.com/Yuri-NagaSaki/ImageFlow
+          cd ImageFlow
+          GOOS=freebsd GOARCH=${{ matrix.arch }} CGO_ENABLED=1 go build -o imageflow-freebsd-${{ matrix.arch }} main.go
+          EOF
 
-      - name: Upload artifact
+      - name: Download artifacts
+        run: |
+          scp -P 2222 root@localhost:ImageFlow/imageflow-freebsd-* .
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: freebsd-${{ matrix.arch }}
-          path: /freebsd/ImageFlow/imageflow-freebsd-*
-
+          path: imageflow-freebsd-*
   build_linux:
     needs: version_check
     if: needs.version_check.outputs.should_build == 'true'
